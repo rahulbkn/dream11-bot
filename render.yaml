@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: dream11-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CRICAPI_KEY
+        sync: false
+disks:
+  - name: data
+    mountPath: "/opt/render/project/src"
+    sizeGB: 1

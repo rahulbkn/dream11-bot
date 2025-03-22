@@ -1,0 +1,7 @@
+python-telegram-bot==13.7
+selenium
+webdriver-manager
+requests
+pandas
+numpy
+sqlite3
