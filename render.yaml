@@ -2,7 +2,7 @@ services:
   - type: web
     name: dream11-bot
     env: python
-    runtime: python310  # Use 'python310' instead of 'python-3.10' for Render
+    runtime: python310
     plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python app.py"
@@ -10,7 +10,7 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: CRICAPI_KEY
-        sync: false
+        value: "4a1c0cf5-f217-44e4-aa8f-381ac1b529ea"
     disks:
       - name: data
         mountPath: "/opt/render/project/src"
