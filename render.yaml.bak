@@ -2,7 +2,6 @@ services:
   - type: web
     name: dream11-bot
     env: python
-    runtime: python-3.10  # Explicitly set Python 3.10
     plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python app.py"
@@ -11,7 +10,7 @@ services:
         sync: false
       - key: CRICAPI_KEY
         sync: false
-    disks:
-      - name: data
-        mountPath: "/opt/render/project/src"
-        sizeGB: 1
+disks:
+  - name: data
+    mountPath: "/opt/render/project/src"
+    sizeGB: 1

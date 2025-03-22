@@ -2,6 +2,5 @@ python-telegram-bot==13.7
 selenium
 webdriver-manager
 requests
-pandas
-numpy
-sqlite3
+pandas<2.0.0  # Pin to avoid Python 3.11+ issues
+numpy<1.21.0  # Pin to avoid Python 3.11+ issues
