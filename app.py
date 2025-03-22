@@ -4,21 +4,17 @@ import os
 import json
 import sqlite3
 import requests
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler
 from telegram import ReplyKeyboardMarkup
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CRICAPI_KEY = "YOUR_CRICKET_API_KEY"
+CRICAPI_KEY = os.getenv("CRICAPI_KEY")
 Q_TABLE_FILE = "q_table.json"
 DB_FILE = "player_stats.db"
 
 # Conversation states
-PITCH, PLAYERS, MATCH, RATE = range(4)
+PITCH, MATCH, PLAYERS, RATE = range(4)
 
 # Player pool and Q-table
 players = []
@@ -41,98 +37,146 @@ def setup_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS players (
                  name TEXT PRIMARY KEY, role TEXT, credits REAL, team TEXT, 
-                 runs INTEGER, avg REAL, sr REAL, last_updated REAL)''')
+                 runs INTEGER, avg REAL, sr REAL, points REAL, last_updated REAL)''')
     conn.commit()
     conn.close()
 
 def cache_player_stats(player):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''INSERT OR REPLACE INTO players VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+    c.execute('''INSERT OR REPLACE INTO players VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
               (player["name"], player["role"], player["credits"], player["team"],
-               player["runs"], player["avg"], player["sr"], time.time()))
+               player["runs"], player["avg"], player["sr"], player.get("points", 0), time.time()))
     conn.commit()
     conn.close()
 
 def get_cached_player(name):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT * FROM players WHERE name = ? AND last_updated > ?", (name, time.time() - 86400))  # 24-hour cache
+    c.execute("SELECT * FROM players WHERE name = ? AND last_updated > ?", (name, time.time() - 86400))
     result = c.fetchone()
     conn.close()
-    return dict(zip(["name", "role", "credits", "team", "runs", "avg", "sr", "last_updated"], result)) if result else None
+    return dict(zip(["name", "role", "credits", "team", "runs", "avg", "sr", "points", "last_updated"], result)) if result else None
 
-def setup_selenium():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
-
-def fetch_player_stats_cricapi(player_name):
+def fetch_current_matches():
+    """Fetch list of current/upcoming matches."""
     try:
-        url = f"https://cricapi.com/api/playerFinder?apikey={CRICAPI_KEY}&name={player_name.replace(' ', '+')}"
+        url = f"https://api.cricapi.com/v1/currentMatches?apikey={CRICAPI_KEY}&offset=0"
         response = requests.get(url).json()
-        pid = response["data"][0]["pid"]
-        
-        stats_url = f"https://cricapi.com/api/playerStats?apikey={CRICAPI_KEY}&pid={pid}"
-        stats = requests.get(stats_url).json()
-        odi_stats = stats["data"]["batting"]["ODIs"]
-        
-        role = stats["playingRole"].split(" ")[0]  # e.g., "Batsman", "Bowler"
-        credits = min(10.0, max(7.0, float(odi_stats.get("Ave", 20)) / 5))
-        return {
-            "name": player_name,
-            "role": role,
-            "credits": credits,
-            "runs": int(odi_stats.get("Runs", 0).replace(",", "")),
-            "avg": float(odi_stats.get("Ave", 0)),
-            "sr": float(odi_stats.get("SR", 0))
-        }
+        return response["data"]
     except Exception as e:
-        print(f"CricAPI error for {player_name}: {e}")
-        return None
+        print(f"Error fetching current matches: {e}")
+        return []
 
-def fetch_player_stats_selenium(player_name, driver):
+def fetch_match_squad(match_id):
+    """Fetch squad data for a specific match."""
     try:
-        driver.get(f"https://search.espncricinfo.com/ci/content/player/search.html?search={player_name.replace(' ', '+')}")
-        time.sleep(2)
-        player_link = driver.find_element(By.CLASS_NAME, "playerName")
-        player_id = player_link.get_attribute("href").split("/")[-1].split(".")[0]
-
-        driver.get(f"https://www.espncricinfo.com/player/{player_name.replace(' ', '-')}-{player_id}")
-        time.sleep(2)
-        stats_table = driver.find_element(By.XPATH, "//div[contains(@class, 'ds-p-0')]//table")
-        rows = stats_table.find_elements(By.TAG_NAME, "tr")[1]
-        cols = rows.find_elements(By.TAG_NAME, "td")
-        
-        runs = int(cols[6].text.replace(",", ""))
-        avg = float(cols[8].text)
-        sr = float(cols[9].text)
-        role = "Batsman"  # Simplified
-        credits = min(10.0, max(7.0, avg / 5))
-        return {"name": player_name, "role": role, "credits": credits, "runs": runs, "avg": avg, "sr": sr}
+        url = f"https://api.cricapi.com/v1/match_squad?apikey={CRICAPI_KEY}&id={match_id}"
+        response = requests.get(url).json()
+        if "data" not in response or not response["data"]:
+            return None
+        squad = response["data"]["squad"]
+        return squad[0]["players"], squad[1]["players"]  # Team 1 and Team 2
     except Exception as e:
-        print(f"Selenium error for {player_name}: {e}")
-        return None
+        print(f"Error fetching match squad for {match_id}: {e}")
+        return None, None
 
-def initialize_player_pool(player_names, driver):
+def fetch_series_squad(series_id):
+    """Fetch squad data for a series."""
+    try:
+        url = f"https://api.cricapi.com/v1/series_squad?apikey={CRICAPI_KEY}&id={series_id}"
+        response = requests.get(url).json()
+        if "data" not in response or not response["data"]:
+            return None
+        squad = response["data"]["squad"]
+        return squad[0]["players"], squad[1]["players"]  # Team 1 and Team 2
+    except Exception as e:
+        print(f"Error fetching series squad for {series_id}: {e}")
+        return None, None
+
+def fetch_match_scorecard(match_id):
+    """Fetch scorecard data for detailed stats."""
+    try:
+        url = f"https://api.cricapi.com/v1/match_scorecard?apikey={CRICAPI_KEY}&id={match_id}"
+        response = requests.get(url).json()
+        if "data" not in response or not response["data"]:
+            return {}
+        return response["data"]["scorecard"]  # Adjust based on actual structure
+    except Exception as e:
+        print(f"Error fetching scorecard for {match_id}: {e}")
+        return {}
+
+def fetch_match_points(match_id):
+    """Fetch Dream11 points for players."""
+    try:
+        url = f"https://api.cricapi.com/v1/match_points?apikey={CRICAPI_KEY}&id={match_id}&ruleset=0"
+        response = requests.get(url).json()
+        if "data" not in response or not response["data"]:
+            return {}
+        return response["data"]["fantasy_points"]  # Adjust based on actual structure
+    except Exception as e:
+        print(f"Error fetching match points for {match_id}: {e}")
+        return {}
+
+def initialize_player_pool(match_id=None, series_id=None, player_names=None):
     global players
     players = []
-    for name in player_names:
+    
+    if match_id:
+        team1_players, team2_players = fetch_match_squad(match_id)
+        if not team1_players or not team2_players:
+            return
+        scorecard = fetch_match_scorecard(match_id)
+        points = fetch_match_points(match_id)
+    elif series_id:
+        team1_players, team2_players = fetch_series_squad(series_id)
+        if not team1_players or not team2_players:
+            return
+        scorecard = {}
+        points = {}
+    else:
+        team1_players = team2_players = []
+        scorecard = {}
+        points = {}
+
+    all_players = team1_players + team2_players if team1_players else [ {"name": n, "role": "Unknown"} for n in player_names or [] ]
+
+    for player in all_players:
+        name = player["name"]
         cached = get_cached_player(name)
         if cached:
-            stats = cached
-        else:
-            stats = fetch_player_stats_cricapi(name) or fetch_player_stats_selenium(name, driver)
-            if stats:
-                cache_player_stats(stats)
-        if stats:
-            stats["team"] = random.choice(["TeamA", "TeamB"])
-            players.append(stats)
-            if name not in q_table:
-                q_table[name] = {"selection_score": 0.5}
+            players.append(cached)
+            continue
+        
+        role = player.get("role", "Batsman")
+        team = "TeamA" if player in team1_players else "TeamB"
+        
+        # Get stats from scorecard if available
+        stats = scorecard.get(name, {}) if isinstance(scorecard, dict) else {}
+        runs = int(stats.get("runs", 0))
+        avg = float(stats.get("average", 0)) or runs  # Fallback to runs if no avg
+        sr = float(stats.get("strike_rate", 0))
+        
+        # Get points for credits
+        player_points = points.get(name, {}).get("points", 0) if isinstance(points, dict) else 0
+        credits = min(10.0, max(7.0, player_points / 10 or avg / 5))
+
+        player_data = {
+            "name": name,
+            "role": role,
+            "credits": credits,
+            "team": team,
+            "runs": runs,
+            "avg": avg,
+            "sr": sr,
+            "points": player_points
+        }
+        cache_player_stats(player_data)
+        players.append(player_data)
+    
+    for p in players:
+        if p["name"] not in q_table:
+            q_table[p["name"]] = {"selection_score": 0.5}
     save_q_table()
 
 def update_q_table(team, performance_score):
@@ -158,17 +202,17 @@ def genetic_algorithm_team(pitch_weights, population_size=50, generations=20):
         ar = sum(1 for p in team if p["role"] == "All-rounder")
         if not (1 <= wk <= 4 and 3 <= bat <= 6 and 3 <= bowl <= 6 and 1 <= ar <= 4):
             return 0
-        return sum(pitch_weights[p["role"]] * q_table[p["name"]]["selection_score"] * p["avg"] for p in team)
+        return sum(pitch_weights[p["role"]] * q_table[p["name"]]["selection_score"] * (p["points"] or p["avg"]) for p in team)
 
     population = [random.sample(players, 11) for _ in range(population_size)]
     for _ in range(generations):
         population = sorted(population, key=fitness, reverse=True)
-        next_gen = population[:10]  # Elitism
+        next_gen = population[:10]
         while len(next_gen) < population_size:
             parent1, parent2 = random.sample(population[:20], 2)
             crossover = random.randint(1, 10)
             child = parent1[:crossover] + [p for p in parent2 if p not in parent1[:crossover]][:11 - crossover]
-            if random.random() < 0.1:  # Mutation
+            if random.random() < 0.1:
                 child[random.randint(0, 10)] = random.choice([p for p in players if p not in child])
             next_gen.append(child)
         population = next_gen
@@ -188,7 +232,7 @@ def generate_team_combinations(pitch_type, num_combinations=20):
     for _ in range(num_combinations):
         team = genetic_algorithm_team(weights)
         combinations.append(team)
-        update_q_table(team, random.uniform(0, 1))  # Simulated; replace with real feedback
+        update_q_table(team, random.uniform(0, 1))  # Replace with real points later
     return combinations[:num_combinations]
 
 def start(update, context):
@@ -200,32 +244,51 @@ def start(update, context):
 
 def pitch(update, context):
     context.user_data["pitch"] = update.message.text
-    update.message.reply_text("Enter player names (comma-separated) or 'default' for a sample set:")
+    matches = fetch_current_matches()
+    if matches:
+        match_list = "\n".join([f"{i+1}. {m['name']} (ID: {m['id']})" for i, m in enumerate(matches[:5])])
+        update.message.reply_text(f"Select a match by number or enter a match/series ID:\n{match_list}\nOr type 'skip' for manual players:")
+    else:
+        update.message.reply_text("Enter a match/series ID or 'skip' for manual players:")
+    return MATCH
+
+def match(update, context):
+    match_input = update.message.text.strip().lower()
+    matches = fetch_current_matches()
+    
+    if match_input.isdigit() and 1 <= int(match_input) <= len(matches):
+        context.user_data["match_id"] = matches[int(match_input) - 1]["id"]
+        context.user_data["series_id"] = None
+    elif match_input != "skip":
+        context.user_data["match_id"] = match_input if "match" in context.user_data.get("last_input", "") else None
+        context.user_data["series_id"] = match_input if "series" in context.user_data.get("last_input", "") else None
+    else:
+        context.user_data["match_id"] = context.user_data["series_id"] = None
+    
+    context.user_data["last_input"] = match_input
+    update.message.reply_text("Enter player names (comma-separated) or 'default' (ignored if match/series ID provided):")
     return PLAYERS
 
 def players(update, context):
     player_input = update.message.text.strip()
-    if player_input.lower() == "default":
-        context.user_data["players"] = ["Virat Kohli", "Joe Root", "Jasprit Bumrah", "Ben Stokes"]
+    if player_input.lower() == "default" and not (context.user_data["match_id"] or context.user_data["series_id"]):
+        context.user_data["players"] = ["Virat Kohli", "Rohit Sharma", "Jasprit Bumrah", "KL Rahul"]
     else:
-        context.user_data["players"] = [p.strip() for p in player_input.split(",")]
-    
-    update.message.reply_text("Enter match ID (from CricAPI) or 'skip' for generic teams:")
-    return MATCH
-
-def match(update, context):
-    match_input = update.message.text.strip()
-    context.user_data["match"] = match_input if match_input.lower() != "skip" else None
+        context.user_data["players"] = [p.strip() for p in player_input.split(",")] if not (context.user_data["match_id"] or context.user_data["series_id"]) else []
 
     pitch_type = context.user_data["pitch"]
+    match_id = context.user_data["match_id"]
+    series_id = context.user_data["series_id"]
     player_names = context.user_data["players"]
     
     update.message.reply_text(f"Generating 20 teams for {pitch_type} pitch...")
     load_q_table()
     setup_db()
-    driver = setup_selenium()
-    initialize_player_pool(player_names, driver)
-    driver.quit()
+    initialize_player_pool(match_id, series_id, player_names)
+
+    if not players:
+        update.message.reply_text("Failed to fetch player data. Try again with a valid ID or players.")
+        return ConversationHandler.END
 
     teams = generate_team_combinations(pitch_type)
     context.user_data["teams"] = teams
@@ -263,8 +326,8 @@ def main():
         entry_points=[CommandHandler("start", start)],
         states={
             PITCH: [MessageHandler(Filters.text & ~Filters.command, pitch)],
-            PLAYERS: [MessageHandler(Filters.text & ~Filters.command, players)],
             MATCH: [MessageHandler(Filters.text & ~Filters.command, match)],
+            PLAYERS: [MessageHandler(Filters.text & ~Filters.command, players)],
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
